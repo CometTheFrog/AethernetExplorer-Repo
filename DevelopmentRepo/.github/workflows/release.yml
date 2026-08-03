@@ -1,0 +1,102 @@
+name: Publish Aethernet Explorer Alpha
+
+on:
+  push:
+    tags:
+      - "v*.*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Four-part version, for example 0.9.0.1"
+        required: true
+        type: string
+      release_notes:
+        description: "Optional release notes"
+        required: false
+        type: string
+
+concurrency:
+  group: aethernet-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out development repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ inputs.version }}"
+          }
+          else {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+            throw "Version must contain four numeric parts, for example 0.9.0.1. Received: $version"
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build complete Dalamud package
+        shell: pwsh
+        run: |
+          ./tools/Build-Release.ps1 `
+            -Version "${{ steps.version.outputs.version }}" `
+            -OutputDirectory "${{ github.workspace }}/artifacts"
+
+      - name: Prepare release notes
+        shell: pwsh
+        run: |
+          $notes = "${{ inputs.release_notes }}"
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            $notes = @"
+          Aethernet Explorer alpha ${{ steps.version.outputs.version }}
+
+          This is a closed-testing build distributed through the Aethernet Explorer custom Dalamud repository.
+          "@
+          }
+
+          Set-Content `
+            -LiteralPath "${{ github.workspace }}/artifacts/release-notes.md" `
+            -Value $notes `
+            -Encoding UTF8
+
+      - name: Publish release and update Dalamud feed
+        shell: pwsh
+        env:
+          AETHERNET_REPO_TOKEN: ${{ secrets.AETHERNET_REPO_TOKEN }}
+        run: |
+          ./tools/Publish-Distribution.ps1 `
+            -Version "${{ steps.version.outputs.version }}" `
+            -PackagePath "${{ github.workspace }}/artifacts/AethernetExplorer.zip" `
+            -ManifestPath "${{ github.workspace }}/artifacts/pluginmaster.json" `
+            -ReleaseNotesPath "${{ github.workspace }}/artifacts/release-notes.md" `
+            -Token $env:AETHERNET_REPO_TOKEN
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AethernetExplorer-${{ steps.version.outputs.version }}
+          path: |
+            artifacts/AethernetExplorer.zip
+            artifacts/pluginmaster.json
+          if-no-files-found: error
